@@ -1,0 +1,1279 @@
+#!/bin/bash
+CONPATH="/nas/config"
+
+#Future all config save here
+if [ ! -d /nas/config ]; then
+	mkdir /nas/config
+fi
+
+if [ ! -f /DOM/nas.conf ]; then
+	cp /etc/nas.conf /DOM/
+fi
+
+. /DOM/nas.conf
+
+#CHECKMB=`dmidecode |grep Product`
+loadmodule(){
+	
+	depmod
+	mb=`dmidecode -t baseboard|grep "Product Name:"|awk -F " " {'print $3'}`
+	if [ "${mb}x" == "x" ]; then
+		mb="UnknownMB"
+	fi
+	touch /nas/config/is${mb}
+	modprobe mii
+	#r8168 might panic, use kernel
+	if TEST=`echo ${mb} |grep "G41"`;then
+		modprobe r8169
+	fi
+	if TEST=`echo ${mb} |grep "B75N"`;then
+		modprobe r8169
+	fi
+
+	#
+	# DRIVER AND CHECK
+	#
+
+	#start udevd
+	udevd -d
+
+	#set default networking
+	
+	sysctl -p /etc/sysctl.conf >/dev/null 2>&1 
+	
+	if [ "${LOAD_MODULES}" == "" ];then
+		LOAD_MODULES="ioatdma dca e1000e igb ixgbe mlx4_en bonding"
+	fi
+
+	for MODULE in $LOAD_MODULES
+	do
+		#echo "Load $I"
+		modprobe $MODULE
+		if ! TLSMOD=`lsmod |grep $MODULE`; then
+			echo ${MODULE} >>  /nas/tmp/ERROR_LOAD_DRIVER
+			#exit -1
+		fi
+	done
+	
+	if [ -f /nas/config/isUnknownMB ]; then
+		modprobe e1000
+	fi
+	
+	if [ -f /nas/config/isS7002 -o /nas/config/isS7004 ];then
+		#HWMON
+		modprobe hwmon
+		modprobe hwmon_vid
+		modprobe i2c_core
+		modprobe i2c-i801
+		modprobe coretemp
+		modprobe w83793
+	fi
+	
+	#RAID
+	modprobe scsi_transport_sas
+	modprobe scsi_wait_scan
+	modprobe libsas
+	modprobe mpt2sas	
+	#For India
+	modprobe mptspi
+	
+	#ENCBOARD
+	modprobe i2c-tiny-usb
+	modprobe w83601
+	modprobe w83795
+	encmgr --test
+	
+	#printer
+	modprobe usblp
+
+	#irqbalance
+	irqbalance
+}
+
+_load_target_backgound(){	
+
+	#TARGET
+	cd /
+	#for support Persistent Reservations
+	mkdir -p /var/target/pr
+	#reload udevd for load firmware
+	killall udevd
+	udevd -d
+	depmod
+	modprobe qla2xxx qlini_mode='disabled'	
+	#modprobe tcm_loopback
+	sleep 1
+	/etc/init.d/target start
+	sleep 1
+	if ! TCK=`lsmod |grep tcm_qla2xx`; then
+		modprobe tcm_qla2xxx
+	fi
+#	modprobe tcm_fc
+	for FOLD in core fc iscsi loopback qla2xxx
+	do
+		if [ ! -d /sys/kernel/config/target/$FOLD ]; then
+			mkdir /sys/kernel/config/target/$FOLD
+		fi
+	done
+	/usr/local/bin/ruby /usr/ruby/cmdStorageMgr.rb --ckfc
+	
+	if [ -f /nas/config/isDefaultBoot ]; then
+		ruby /usr/ruby/nasutil.rb --updatedhcpip 
+	fi
+	
+	rm /root/BOOTING  >/dev/null 2>&1 
+
+	# this might cause kernel panic	
+	#	echo "set global legacy_hba_view=true" | targetcli
+	dmesg > /var/log/boot.log
+	
+	#JK ADD 1030320 some special NAS will add one more HBA
+	HAS_HBA=`cat /var/log/boot.log |grep -w "Dell 6Gbps SAS HBA"`
+	if [ "$HAS_HBA" != "" ];then
+        touch /nas/config/hasHBA
+		/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level INFO --msg "Dectect Dell 6Gbps SAS HBA"	
+	fi
+
+	#CM
+	#if [ -f /nas/config/isVGBoot ]; then
+		/etc/init.d/cm start
+	#fi
+}
+
+_checkDualDOM(){
+	dcount=0
+	for BDISK in sda sdb
+	do
+		if [ -f /sys/block/${BDISK}/device/model ]; then
+			if PRODISK=`grep PROWARE /sys/block/${BDISK}/device/model`; then
+				dcount=`expr $dcount + 1`
+				if [ -f /nas/config/isBootFromDOM2 ]; then
+					break
+				fi
+				mkdir /dom/${BDISK}1 -p
+				mount /dev/${BDISK}1 /dom/${BDISK}1
+				if [ -f /dom/${BDISK}1/boot/grub/grubenv ]; then
+					if CKG=`grep sda /dom/${BDISK}1/boot/grub/grubenv`; then
+							echo "BOOT DOM 1 SDA"
+							sed -i s/"next_boot=1"/"next_boot=0"/g /dom/${BDISK}1/boot/grub/grubenv
+					else
+						if CKG=`grep sdb /dom/${BDISK}1/boot/grub/grubenv`; then
+							echo "BOOT DOM 2 SDB"
+							touch /nas/config/isBootFromDOM2
+						fi
+					fi
+				fi
+			fi		
+		fi
+	done
+
+	if [ -f /nas/config/isBootFromDOM2 ]; then
+		echo "DO Recovery from DOM2 to DOM1, Please DO NOT Power off"		
+		/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "Dectect boot from DOM2, do recovery from DOM2 to DOM1"	
+		umount /dev/sda* >/dev/null 2>&1
+		umount /dev/sdb* >/dev/null 2>&1
+		sync
+		dd if=/dev/sdb of=/dev/sda bs=1024
+		blockdev --rereadpt /dev/sda >/dev/null 2>&1
+		touch /nas/config/DoRecoveryFromDOM2ToDOM1
+	fi
+	cd
+	umount /dev/sda* >/dev/null 2>&1
+	umount /dev/sdb* >/dev/null 2>&1
+	rmdir /dom/sda1 >/dev/null 2>&1
+	rmdir /dom/sdb1 >/dev/null 2>&1
+	rmdir /dom >/dev/null 2>&1			
+	mount /dev/sda2 /DOM >/dev/null 2>&1
+}
+
+_setSysctl(){	
+	MEM=`grep MemTotal /proc/meminfo |awk {'print $2'}`
+	#MAX_READ=4194304
+	#MAX_WRITE=2097152
+	
+	MAX_READ=`expr $MEM + $MEM`
+	MAX_WRITE=$MEM
+	
+	DEFAULT_READ=`expr $MAX_READ / 2`
+	DEFAULT_WRITE=`expr $MAX_WRITE / 2`
+
+	echo $DEFAULT_READ > /proc/sys/net/core/rmem_default
+	echo $DEFAULT_WRITE > /proc/sys/net/core/wmem_default
+	
+	sysctl -w net.core.rmem_max=$MAX_READ
+	sysctl -w net.core.wmem_max=$MAX_WRITE
+	echo "10240 $DEFAULT_READ $MAX_READ" > /proc/sys/net/ipv4/tcp_rmem 
+	echo "10240 $DEFAULT_WRITE $MAX_WRITE" > /proc/sys/net/ipv4/tcp_wmem 
+	sysctl -w net.core.netdev_max_backlog=5000
+	sysctl -w net.core.somaxconn=8192
+	sysctl -w vm.min_free_kbytes=256000
+	
+	sysctl -w net.ipv4.tcp_tw_reuse=1
+	sysctl -w net.ipv4.tcp_tw_recycle=1
+	sysctl -w net.ipv4.tcp_window_scaling=1
+	sysctl -w net.ipv4.tcp_timestamps=1
+	sysctl -w net.ipv4.tcp_stack=1
+	sysctl -w net.ipv4.tcp_no_metrics_save=1
+	
+	ulimit -n 65536
+
+	# disable self route
+	for NDEV in `ls /proc/sys/net/ipv4/conf/*/accept_source_route`
+	do
+		echo 0 > ${NDEV}
+	done
+	
+	#reference
+	#i.	net.core.wmem_max=12582912
+	#ii.	net.core.rmem_max=12582912
+	#iii.	net.ipv4.tcp_rmem= 10240 87380 12582912
+	#iv.	net.ipv4.tcp_wmem= 10240 87380 12582912
+	#v.		net.ipv4.tcp_window_scaling = 1
+	#vi.	net.ipv4.tcp_timestamps = 1
+	#vii.	net.ipv4.tcp_stack = 1
+	#viii.	net.ipv4.tcp_no_metrics_save = 1
+	#ix.	net.core.netdev_max_backlog = 5000
+
+	for D_PATH in `find /sys/block/sd*/queue/nr_requests |grep -v sda`
+	do
+		echo 1024 > $D_PATH
+	done			
+}
+_watchdog_fsck()
+{
+	if [ -f /DOM/.nasboot -o -f /DOM/.fsrepir ];then
+        DOM1="sda"
+       if testname=`grep PROWARE /sys/block/sdb/device/model 2>/dev/null`;then
+            # Dual DOM : sda,sdb
+            DOM2="sdb"
+        fi
+
+        for target in `ls /dev/sd*`
+        do
+            DOM2=${DOM2:-sda}         # if DualDOM => DOM2=sdb, else DOM2=sda
+            if ! res=`echo $target|grep ${DOM1}` ;then
+				if ! res=`echo $target|grep ${DOM2}`;then
+                    echo $target
+                fi
+
+            fi
+
+        done
+    fi
+
+}
+_init_svc_background(){
+	
+	cd /
+	tar zxf /DOM/defaultsvc.tgz
+	tar zxf /DOM/tzone.tgz
+	tar zxf /DOM/othersvc.tgz
+	#move here for all library ready
+	tar zxf /DOM/target.tgz
+	
+	ldconfig
+#####ruby can exec now (in defaultsvc.tgz)##### 
+	
+	if [ -f /sys/block/sda/device/model ]; then
+		if TESTNAME=`grep PROWARE /sys/block/sdb/device/model `; then
+			touch /nas/config/isDualDOM
+		fi
+	fi
+	
+	if [ "${DEMOMODE}" == "Y" ]; then
+		touch /nas/config/isDemoMode
+	fi
+
+	if [ "${ENABLE_VG00}" == "Y" ]; then
+		#if [ -f /nas/config/isS7040 -o -f /nas/config/isB75N ]; then	
+			#fix in sata port 2,3
+			#port 0,1 are reservd for dual DOM
+			if TEST=`ls /sys/block/sdb/device/scsi_disk/ 2>/dev/null |grep 2:0:0:0`; then
+				touch /nas/config/isVG00Mode				
+				if TEST=`ls /sys/block/sdc/device/scsi_disk/ 2>/dev/null |grep 3:0:0:0`; then
+					touch /nas/config/isVG00Mode-2
+				fi
+			fi
+		#else
+		#	if TEST=`ls /sys/block/sdb/device/scsi_disk/ 2>/dev/null |grep 2:0:0:0`; then
+		#		touch /nas/config/isVG00Mode
+		#	fi		
+		#fi
+		if [ ! -f /nas/config/isVG00Mode ]; then
+			touch /nas/config/VG00_NODISK
+		fi
+	fi
+	
+	if [ -f /nas/config/isVG00Mode ]; then
+		if [ ! -f /etc/my.cnf ]; then
+			mv /etc/myzfs.cnf /etc/my.cnf
+		fi
+	fi	
+	
+	raiddevice="sdb"	
+	if [ -f /nas/config/isDualDOM ]; then
+		if [ -f /nas/config/isVG00Mode ]; then
+			if [ -f /nas/config/isVG00Mode-2 ]; then
+				raiddevice="sde"
+			else
+				raiddevice="sdd"
+			fi		
+		else	
+			raiddevice="sdb"	
+		fi
+	else
+		if [ -f /nas/config/isVG00Mode ]; then
+			if [ -f /nas/config/isVG00Mode-2 ]; then
+				raiddevice="sdd"
+			else
+				raiddevice="sdc"
+			fi		
+		fi
+	fi
+	
+
+	#RAID, ARECA,LSI,HP,MDADM,ZFS
+	ISZFS=`grep "ORIG_MODEL" /DOM/nas.conf|awk -F "=" {'print $2'}|grep "Z-"`
+	if [ "$ISZFS" != "" ];then
+		touch /nas/config/isZFS
+
+		if [ -f /nas/config/isEN3160A6ZPDC -o -f /nas/config/isEN2120A6ZPDC -o -f /nas/config/isEN2800S6ZCM -o -f /nas/config/isEN1400S6ZSQX ];then
+			touch /nas/config/isHP2720
+			modprobe rr272x_1x
+			echo rr272x_1x > /etc/hptcfg
+		elif [ -f /nas/config/isEN3166JS6ZSQX -o -f /nas/config/isEN2126JS6ZSQX ];then
+			touch /nas/config/isLSI9211		
+		else #4BAY 5BAY
+			touch /nas/config/isHP620
+			modprobe rr62x
+			echo rr62x > /etc/hptcfg
+		fi
+		sleep 1
+		#tune CIFS
+		sed -i --follow-symlinks /"use sendfile"/d /etc/samba/smb.conf
+		
+		ln -s /sbin/zfsmgr /sbin/raidmgr
+		mv /etc/myzfs.cnf /etc/my.cnf
+		
+		#JK ADD 1030223 
+		echo 1 > /sys/module/zfs/parameters/zfs_nocacheflush 
+		echo 0 > /sys/module/zfs/parameters/zfs_prefetch_disable 
+		
+		#cache check
+		if dname=`ls -d /sys/block/sd*/device/scsi_disk/2:0:0:0 2>/dev/null |awk -F / {'print $4'}`; then				
+			ln -s /dev/${dname} /dev/ssd1
+			ln -s /dev/${dname}1 /dev/ssd1p1
+			ln -s /dev/${dname}9 /dev/ssd1p9
+		fi
+		if dname=`ls -d /sys/block/sd*/device/scsi_disk/3:0:0:0 2>/dev/null |awk -F / {'print $4'}`; then	
+			ln -s /dev/${dname} /dev/ssd2
+			ln -s /dev/${dname}1 /dev/ssd2p1
+			ln -s /dev/${dname}9 /dev/ssd2p9			
+		fi
+			
+	else	
+		arecamgr --test	
+		if [ -f /nas/config/isAreca ]; then
+			touch /nas/config/isHWRAID
+			ln -s /sbin/arecamgr /sbin/raidmgr
+			arecamgr --synctime
+		else
+			modprobe megaraid_sas
+			sleep 1
+			lsimgr --test	
+			if [ -f /nas/config/isLSI ]; then
+				touch /nas/config/isHWRAID
+				ln -s /sbin/lsimgr /sbin/raidmgr
+				lsimgr --synctime
+			else
+				rmmod megaraid_sas
+				modprobe rr272x_1x
+				echo rr272x_1x > /etc/hptcfg
+				hpmgr --test
+				if [ -f /nas/config/isHP ]; then
+					touch /nas/config/isHWRAID
+					ln -s /sbin/hpmgr /sbin/raidmgr
+					hptsvr >/dev/null 2>&1 &
+				else
+					rmmod rr272x_1x
+					touch /nas/config/isSWRAID
+	# too big might causes login issue
+					if TEST=`lspci |grep 88SE9123`; then
+						touch /nas/config/isMarvell9123
+						ln -s /sbin/mdmgr /sbin/raidmgr
+					elif TEST=`lspci |grep HighPoint|grep 620`; then
+						modprobe rr62x
+						echo rr62x > /etc/hptcfg					
+						touch /nas/config/isHP620
+						ln -s /sbin/mdmgr /sbin/raidmgr
+					else
+						touch /nas/config/isUnknownModel 
+					fi
+					echo 60000 > /proc/sys/dev/raid/speed_limit_max
+					echo 8000 > /proc/sys/dev/raid/speed_limit_min 
+				fi
+			fi			
+		fi	
+	fi
+	if [ -f /nas/config/isHWRAID ]; then
+		if ! PPP=`dmesg |grep ${raiddevice}`; then
+			echo "wait for device ready"
+			sleep 15
+		fi
+	fi
+	sleep 1
+	raidmgr --enablebeep > /dev/null 2>&1
+	
+	mkdir /dom1 
+	mount /dev/sda1 /dom1
+	if CKG=`grep emergency_boot /proc/cmdline`; then	
+			touch /nas/config/isEmergencyBoot			
+	fi
+	umount /dom1
+	rmdir /dom1
+	
+	if [ -f /nas/config/isEmergencyBoot	]; then		
+		touch /nas/config/isDefaultBoot
+	elif [ -f /DOM/REBOOT2DEFAULT ]; then
+		echo BACK TO DEFAULT, DESTROY RAID AND DATA
+		if [ -f /nas/config/isAreca ]; then
+			RAIDLIST=`raidmgr --grl |grep Array0 |awk -F , {'print $2'}`
+			if [ "${RAIDLIST}" != "" ]; then
+				for RDEV in ${RAIDLIST}
+				do
+					rname=`grep ${RDEV} /sys/block/sd*/device/model |awk -F / {'print $4'}`
+					sleep 3
+					echo 1 > /sys/block/${rname}/device/delete
+					raidmgr --dr --name ${RDEV}
+				done
+			fi			
+			while read SPAREDISK
+			do
+				ECLOSURE=`echo ${SPAREDISK} |awk -F ',' {'print $1'}|sed s/" "/""/g`
+				ESLOT=`echo ${SPAREDISK} |awk -F ',' {'print $2'}|sed s/" "/""/g`
+				ESLOT=`expr ${ESLOT} + 1`
+				#echo $ECLOSURE:$ESLOT
+				raidmgr --ds --disks $ECLOSURE:$ESLOT
+			done < <(raidmgr --gdl|grep Spare)
+		else
+			while read SPAREDISK
+			do
+				ECLOSURE=`echo ${SPAREDISK} |awk -F ',' {'print $1'}|sed s/" "/""/g`
+				ESLOT=`echo ${SPAREDISK} |awk -F ',' {'print $2'}|sed s/" "/""/g`
+				ESLOT=`expr ${ESLOT}`
+				#echo $ECLOSURE:$ESLOT
+				raidmgr --ds --disks $ECLOSURE:$ESLOT
+			done < <(raidmgr --gdl|grep Spare)
+		fi
+		
+		#if [ -f /nas/config/isVG00Mode ]; then
+		#	zpool import -f VG00			
+		#	zfs destroy VG00 -R
+		#	zpool destroy VG00
+		#fi
+		
+		sleep 1
+		#in case to handle foreign array
+		ruby /usr/ruby/cmdArrayMgr.rb --array --clearall >/dev/null 2>&1					
+		if [ -f /DOM/mdadm.conf ]; then
+			rm /DOM/mdadm.conf 
+		fi
+		#if [ ! -f /nas/config/isZFS ]; then
+		rm /DOM/REBOOT2DEFAULT		
+		#fi
+		
+		#for clear all disk which marked online, might be unavail status if not clear while boot.
+		ZDEV=`zpool import 2>/dev/null |grep ONLINE |grep sd |awk {'printf("%s ",$1)'}`
+		if [ "x$ZDEV" != "x" ]; then
+			zpool create -f VGTMP ${ZDEV}
+			echo CLEAR ALL VG
+			zpool destroy VGTMP
+		fi
+
+#		for disk in `zpool import |grep ONLINE |grep sd |awk {'print $1'}`
+#		do
+#			echo ${disk}
+#			zpool create -f VGTMP ${disk}
+#			zpool destroy VGTMP
+#		done	
+	elif [ -f /DOM/REBOOT2DEFAULTKEEPRAID ]; then
+		echo BACK TO DEFAULT BUT KEEP RAID
+		if [ -f /nas/config/isVG00Mode ]; then
+			zpool import -f VG00			
+			zfs destroy VG00 -R
+			zpool destroy VG00
+		fi
+		if [ -f /nas/config/isSWRAID ]; then
+			if [ -f /DOM/mdadm.conf ]; then
+				cp -af /DOM/mdadm.conf /etc/
+			fi
+			mdadm -As
+		elif [ -f /nas/config/isZFS ]; then
+			for pool in `zpool import |grep pool:|awk {'print $2'}`
+			do
+				zpool import -f ${pool}
+				zfs destroy ${pool} -R
+			done					
+		fi
+		for DEV in `cd /sys/block; ls -d sd* md*`
+		do
+			PC=`parted -s /dev/${DEV} pri |grep primary -c` 
+			DMDL=`cat /sys/block/${DEV}/model`
+			if TESTNAME=`echo ${DMDL} |grep PROWARE`; then
+				continue
+			fi
+			if [ ${PC} != 4 ]; then
+				continue
+			fi
+			for I in 1 2 3 4
+			do
+				parted -s /dev/${DEV} rm ${I} 2>/dev/null
+			done
+		done
+		
+		rm /DOM/REBOOT2DEFAULTKEEPRAID	
+	else	
+	
+		if [ -f /nas/config/isSWRAID ]; then
+			if [ -f /DOM/mdadm.conf ]; then
+				cp -af /DOM/mdadm.conf /etc/
+			fi
+			mdadm -As
+			sleep 3
+			if ! TESTMD=`grep md /proc/mdstat |awk {'print $1'}`; then				
+				rm /etc/mdadm.conf
+				mdadm -As
+				sleep 3
+			fi
+			#Stop unclear/inactive md
+			for DEV in `grep inactive /proc/mdstat |awk {'print $1'}`
+			do
+				echo "!!! WARNING "
+				echo "!!! Detect Un-clear MD in device ${DEV}, Stop and Ignore it."
+				echo ""
+				mdadm --stop /dev/${DEV}
+			done
+			for mpath in `ls /sys/block/md*/md/stripe_cache_size 2>/dev/null`
+			do
+				echo 32768 > ${mpath}
+			done
+			for DEV in `cd /sys/block; ls -d sd* md*`
+			do							
+				if TESTNAME=`grep PROWARE /sys/block/${DEV}/model`; then
+					continue
+				fi
+				blockdev --setra 65536 /dev/${DEV}				
+			done
+		fi
+		
+		ldconfig			
+		
+		READ_AHEAD_KB=65536
+		if [ -f /usr/ruby/nasConstant.rb ]; then
+			. /usr/ruby/nasConstant.rb >/dev/null 2>&1
+		fi
+		for DEV in `cd /sys/block; ls -d sd* md*`
+		do
+			if CKDB=`parted /dev/${DEV} pri 2>/dev/null |grep " 4    "`; then
+				blockdev --setra ${READ_AHEAD_KB} /dev/${DEV}
+				if [ ! -f /nas/config/isZFS ]; then
+					parted -s /dev/${DEV} set 4 lvm on
+				fi
+			fi
+		done
+		
+		pvscan
+		
+		#CHECK if need extend pv
+		if [ -f /nas/config/isZFS ]; then
+			for pool in `zpool import |grep id:|awk {'print $2'}`
+			do
+				echo ENABLE POOL ${pool}
+				zpool import -f ${pool}
+			done			
+			if TEST=`df |grep VG01`; then
+				if ! TEST=`df |grep HOME`; then
+					rm -rf /home
+					zfs mount VG01/HOME
+				fi
+			      if TEST=`df |grep D_CONFBK`; then			
+					zfs umount VG01/D_CONFBK
+   			      fi
+			fi
+		else
+			#JK ADD
+			if [ -f /nas/config/isSWRAID ];then
+				SPLIT_CHAR="p4"
+			else
+				SPLIT_CHAR="4"
+			fi
+			
+			for DEVICE in `pvs |grep lvm |awk {'print $1'}|awk -F ${SPLIT_CHAR} {'print $1'}`
+			do
+				CSIZE=`parted -s ${DEVICE} unit GB print 2>/dev/null|grep "Disk ${DEVICE}"| awk {'print $3'}|awk -F GB {'print $1'}|awk -F . {'print $1'}`
+				OSIZE=`parted -s ${DEVICE} unit GB print 2>/dev/null|grep " 4    "| awk {'print $3'}|awk -F GB {'print $1'}|awk -F . {'print $1'}`
+				OSIZE=`expr $OSIZE + 20`
+				if [ "${CSIZE//[^0-9]/}" == "$CSIZE" ] && [ "${OSIZE//[^0-9]/}" == "$OSIZE" ]; then		
+					if [ $CSIZE -gt $OSIZE ]; then						
+							echo "Found device size changed, Do resize." 				
+							parted -s ${DEVICE} rm 1
+							parted -s ${DEVICE} rm 2
+							parted -s ${DEVICE} rm 3
+							parted -s ${DEVICE} rm 4							
+							#CSUM=`fdisk -l ${DEVICE} |grep track |awk -F " " {'print $5'}`
+							CSUM=`parted -s ${DEVICE} unit cyl pri 2>/dev/null |grep ${DEVICE}|awk {'print $3'}|awk -F cyl {'print $1'}`
+							parted -s ${DEVICE} mklabel gpt		
+							parted -s ${DEVICE} mkpart primary 0c 100c
+							parted -s ${DEVICE} mkpart primary 101c 200c
+							parted -s ${DEVICE} mkpart primary 201c 300c
+							parted -s ${DEVICE} mkpart primary 301c ${CSUM}c
+							parted -s ${DEVICE} set 4 lvm on
+		
+							pvscan > /dev/null 2>&1
+							pvresize -t ${DEVICE}${SPLIT_CHAR} > /dev/null 2>&1
+							pvscan > /dev/null 2>&1
+							pvresize ${DEVICE}${SPLIT_CHAR}
+							pvscan > /dev/null 2>&1
+					fi
+				fi
+			done
+			
+			vgscan
+			vgchange -ay
+			lvscan				
+		fi	
+		
+		for CLV in `ls -d /dev/VG*/*`
+		do		
+			blockdev --setra ${READ_AHEAD_KB} ${CLV}
+		done
+		if [ -f /nas/config/isVG00Mode ]; then
+			zpool import -f VG00
+			if [ ! -f /etc/my.cnf ]; then
+				mv /etc/myzfs.cnf /etc/my.cnf
+			fi
+		fi
+		if [ -b /dev/VG01/D_ROOT ] || TEST=`zfs list |grep D_ROOT`; then
+			if [ -f /nas/config/isVG00Mode ]; then
+				mkswap /dev/zvol/VG00/D_SWAP
+				swapon /dev/zvol/VG00/D_SWAP	
+			fi
+			if [ -f /nas/config/isZFS ]; then	
+				if [ -b /dev/zvol/VG01/D_SWAP ]; then			
+					mkswap /dev/zvol/VG01/D_SWAP
+					swapon /dev/zvol/VG01/D_SWAP
+				fi
+				if [ -d /dev/zvol ];then
+					cd /dev/zvol
+					for I in `ls`
+					do
+						if [ ! -d /dev/${I} -a ! -b /dev/${I} ]; then
+							ln -s /dev/zvol/${I} /dev/${I}
+						fi
+						#blockdev --setra ${READ_AHEAD_KB} /dev/zvol/${I}
+					done
+				fi					
+			else			
+				mount /dev/VG01/D_ROOT /nas/root
+				mount /dev/VG01/D_LOG /nas/log
+				mkswap /dev/VG01/D_SWAP
+				swapon /dev/VG01/D_SWAP
+			fi
+			touch /nas/config/isInited
+			rm -rf /var/log >/dev/null 2>&1
+			ln -s /nas/log /var/log  >/dev/null 2>&1
+			rm -f /var/lib/samba
+			ln -s /nas/root/samba /var/lib/samba  >/dev/null 2>&1
+			if [ ! -d /var/log/httpd ]; then
+				mkdir /var/log/httpd
+			fi
+			rm -rf /usr/httpd/logs
+			ln -s /var/log/httpd /usr/httpd/logs
+			
+			# INIT ULOCAL IF NOT DEFAULT
+			if [ ! -d /nas/root/ulocal ]; then
+				mkdir /nas/root/ulocal
+			fi
+			cp -af /usr/local/* /nas/root/ulocal/
+			rm -rf /usr/local/*
+			mount --bind /nas/root/ulocal /usr/local	
+		fi				
+	fi
+	
+	
+	
+	if [ -f /nas/config/isEmergencyBoot	]; then				
+		rm /nas/config/isVGBoot 2>/dev/null
+		touch /nas/config/isDefaultBoot
+		echo Emergency Boot
+		for DEV in `cd /sys/block; ls -d sd* md*`
+		do
+			if CKDB=`parted /dev/${DEV} pri 2>/dev/null |grep " 4    "`; then
+				parted -s /dev/${DEV} set 4 lvm on
+			fi
+		done
+		pvscan
+		vgscan
+		vgchange -ay
+		lvscan		
+	elif [ -f /DOM/REBOOT2DEFAULTKEEPDATA ]; then
+		rm /etc/fstab
+		cp /nas/root/conf/fstab /etc/fstab
+		rm /nas/root/conf/*
+		rm /nas/config/isVGBoot
+		touch /nas/config/isDefaultBoot
+		echo BACK TO DEFAULT BUT KEEP DATA
+	fi
+	
+	
+	if [ -d /nas/root/conf ]; then
+		touch /nas/config/isVGBoot
+	else
+		touch /nas/config/isDefaultBoot
+	fi
+	
+	if [ -f /usr/share/zoneinfo/${DEF_TZONE} -a -f /nas/config/isDefaultBoot  ]; then
+		cp -af /usr/share/zoneinfo/${DEF_TZONE} /etc/localtime
+	fi
+	hwclock -s
+	
+	start rsyslog
+	
+	##### db can't exec here#####
+	ldconfig
+	
+	cd
+	tar zxf /DOM/nasc.tgz
+	rm -rf /usr/httpd/htdocs/www
+	mv NAS3/* /usr/httpd/htdocs
+	cd /usr/httpd/htdocs
+	rm -rf  NAS3/	
+	
+	#for OEM logo
+	if [ -d /DOM/images -a "${CHANGELOGO}" == "Y" ]; then
+		cp -af /DOM/images/* /usr/httpd/htdocs/www/images/sites/
+	fi
+			
+	#CONFIG
+	if [ -f /nas/config/isVGBoot -o -f /DOM/REBOOT2DEFAULTKEEPDATA  ]; then
+		if [ ! -f /DOM/REBOOT2DEFAULTKEEPDATA ]; then
+			/usr/local/bin/ruby /usr/ruby/linkconf.rb --bootlink
+			echo Set Time
+			hwclock -s
+		fi
+		for FSDIR in `cat /etc/fstab |awk {'print $2'}`
+		do
+			mkdir -p ${FSDIR} >/dev/null 2>&1
+		done
+		mount -a
+		quotaon -a >/dev/null 2>&1
+	fi
+	
+	#move here for update timezone
+	klogd -c 3
+	
+	#NETWORK
+	if [ -f /nas/config/isDefaultBoot ]; then
+	# do before DB
+		hostname ${DEF_HOSTNAME}	
+	fi
+	
+	#ln -s /usr/local/lib/uams /etc/sysconfig/netatalk/uams
+	mkdir /var/empty
+	chmod 755 /var/empty
+	mkdir /var/lib/logrotate
+	chmod 755 /var/lib/logrotate
+	ldconfig
+	
+		
+	cd /usr/local/mysql/
+	if [ -d /nas/root/sqldata ]; then
+		if [ -d /usr/local/mysql/data ]; then
+			rm -rf /usr/local/mysql/data
+		fi
+		ln -s /nas/root/sqldata /usr/local/mysql/data 
+		nice -n -20 /usr/local/mysql/bin/mysqld --user root &
+		sleep 2		
+		/usr/local/mysql/bin/mysqladmin -u root -pproware password j8dSyhy3 >/dev/null 2>&1
+		#echo Check DB
+		if [ ! -d /var/log/db_boot ]; then
+			mkdir /var/log/db_boot
+			mv /var/log/db_boot-* /var/log/db_boot/ 2>/dev/null
+		fi
+		DCOUNT=`ls /var/log/db_boot/db_boot* |wc -l`
+		if [ $DCOUNT -gt 15 ]; then
+				DFILE=`ls -cr /var/log/db_boot/db_boot* |grep "" -m1`
+				rm ${DFILE}
+		fi
+		NDATE=`date +%Y-%m-%d-%s`
+		/usr/local/mysql/bin/mysqlcheck --auto-repair --check -u root -pj8dSyhy3 nas3 > /var/log/db_boot/db_boot-${NDATE} 2>&1
+		/usr/local/bin/ruby /usr/ruby/cmdSnapshotMgr.rb --updateStatus	
+	else
+		scripts/mysql_install_db --force --user root
+		nice -n -20 /usr/local/mysql/bin/mysqld --user root &
+		sleep 2
+		/usr/local/mysql/bin/mysqladmin -u root password j8dSyhy3
+		/usr/local/mysql/bin/mysqladmin -u root -pj8dSyhy3 create nas3
+		/usr/local/mysql/bin/mysqladmin -u root -pj8dSyhy3 create nas3_performance
+		#detect Areca
+		
+		/usr/local/bin/ruby /usr/ruby/initdb.rb --initdb
+		/usr/local/bin/ruby /usr/ruby/cmdBackupMgr.rb --initDB
+		/usr/local/bin/ruby /usr/ruby/cmdScheduleMgr.rb --initDB
+		/usr/local/bin/ruby /usr/ruby/cmdSnapshotMgr.rb --initDB
+		/usr/local/bin/ruby /usr/ruby/cmdVolumeCloneMgr.rb --initDB
+		/usr/local/bin/ruby /usr/ruby/cmdAttachedMgr.rb --initDB
+		/usr/local/bin/ruby /usr/ruby/cmdFileMgr.rb --createSchema
+		if [ -f /nas/config/isCDROM ];then
+			/usr/local/bin/ruby /usr/ruby/cmdDiscMirrorMgr.rb --initDB
+		fi
+	fi	
+	
+	rm /root/lognow	
+	#####ruby and db can exec now #####
+	#if [ -f /DOM/RAID_FAIL_CALL_PANIC	]; then			
+	#	/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level ERROR --msg "Detect previous Array failed that cause system panic"	
+	#fi
+	if [ -f /nas/config/isEmergencyBoot	]; then			
+		/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level INFO --msg "Detect Emergency Boot"	
+	elif [ -f /DOM/REBOOT2DEFAULTKEEPDATA ]; then	
+		/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level INFO --msg "Detect Reboot to default but keep data."	
+		/usr/local/bin/ruby /usr/ruby/linkconf.rb --confmove
+		/usr/local/bin/ruby /usr/ruby/initdb.rb --initdb
+	else
+		/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level INFO --msg "NAS Boot"	
+	fi
+	
+	if [ -f /nas/config/VG00_NODISK ]; then
+		/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level ERROR --msg "No config disk detected on sata port, switch to standard mode."	
+	fi
+	
+	ruby /usr/ruby/nas.rb "<Command><Call>cmdBeepMute</Call><Mute>false</Mute><pid>cmdMute635</pid><CLIENT_ID>root</CLIENT_ID><CLIENT_IP>127.0.0.1</CLIENT_IP></Command>"
+	
+	#check backup status
+	/usr/local/bin/ruby /usr/ruby/cmdBackupMgr.rb --checkBackupStatus
+	/usr/local/bin/ruby /usr/ruby/cmdShareCopyMgr.rb --checkBackupStatus
+	/usr/local/bin/ruby /usr/ruby/cmdRsyncMgr.rb --checkBackupStatus
+	
+	#No Controller detect
+	if [ ! -f /nas/config/isAreca -a ! -f /nas/config/isLSI -a ! -f /nas/config/isHP -a ! -f /nas/config/isMarvell9123 -a ! -f /nas/config/isHP620 -a ! -f /nas/config/isDemoMode -a ! -f /nas/config/isZFS]; then
+		/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level ERROR --msg "Can not detect RAID Controller. Suggest to do Power off then Power on."	
+	fi
+	
+	if TESTLV=`lvs |grep D_ROOT`; then
+		LSIZE=`lvs /dev/VG01/D_ROOT |grep -v Pool|awk {'print $4'}|awk -F . {'print $1'}`
+		if [ $LSIZE -lt 10 ]; then
+			echo hi
+			lvextend -L+10G /dev/VG01/D_ROOT
+			if TESTFS=`df -T |grep D_ROOT |grep ext`; then
+				echo ext
+				resize2fs /dev/VG01/D_ROOT
+			else
+				echo xfs
+				xfs_growfs /nas/root
+			fi
+			/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level INFO --msg "Auto Extend System Volume +10GB."	
+		fi
+	fi
+	/usr/local/bin/ruby /usr/ruby/cmdVolumeMgr.rb --volgrp --updatesize 	
+	
+	#ISCSI/FC
+	depmod
+	#auto load by target service
+	#modprobe iscsi_target_mod
+	#modprobe target_core_mod
+	#modprobe target_core_file
+	#modprobe target_core_iblock
+	#modprobe tcm_loop
+	#modprobe target_core_pscsi
+	
+	#default	
+	
+	if [ -f /nas/config/isNOLOGO ]; then
+		cp  /usr/httpd/htdocs/www/images/others/login-NoLogo.png /usr/httpd/htdocs/www/images/sites/loginVendorImg.png
+		cp  /usr/httpd/htdocs/www/images/others/top-NoLogo.png /usr/httpd/htdocs/www/images/sites/index_logo.png
+		rm -rf /usr/httpd/htdocs/www/images/others
+	fi
+	
+	#update array status
+	/usr/local/bin/ruby /usr/ruby/cmdStorageMgr.rb --ckarray	
+	
+	if [ ! -f /usr/httpd/conf ]; then
+		ln -s /etc/sysconfig/httpd/conf /usr/httpd/conf
+	fi
+
+	crontab /etc/crontab >/dev/null 2>&1
+	
+
+	if [ -f /nas/config/isDualDOM ]; then
+		_checkDualDOM
+	fi	
+	if [ -f /DOM/_UPGRADED ]; then
+		mkdir /dom1
+		mount /dev/sda1 /dom1
+		#Update emergency
+		cp /dom1/boot/vmlinuz /dom1/boot/vmlinuz-emergency
+		cp /dom1/boot/newinit.img /dom1/boot/newinit-emergency.img
+		cp /dom1/boot/fs_root.gz /dom1/boot/fs_root-emergency.gz
+		sync
+		umount /dom1
+		sync
+		if [ -f /nas/config/isDualDOM ]; then
+			echo "Do copy from DOM1 to DOM2, Please DO NOT Power off"		
+			/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "Detect upgrade, do copy from DOM1 to DOM2."	
+			umount /dev/sda* >/dev/null 2>&1
+			umount /dev/sdb* >/dev/null 2>&1
+			sync
+			dd if=/dev/sda of=/dev/sdb bs=1024
+			blockdev --rereadpt /dev/sdb >/dev/null 2>&1
+			mount /dev/sda2 /DOM
+		fi		
+		rm /DOM/_UPGRADED
+	fi
+	
+	#NETWORK
+	if [ -f /nas/config/isDefaultBoot ]; then		
+		# Do after DB
+		#ifconfig eth0 ${DEF_ETH0_IP}
+		if [ "${DEF_ETH0_IP}" = "" ]; then
+			DEF_ETH0_IP="172.16.0.1"
+		fi
+		if [ "${DEF_GATEWAY}" = "" ]; then
+			DEF_GATEWAY=${DEF_ETH0_IP}
+		fi
+		if [ "${DEF_ETH0_IP}" != "DHCP" ]; then
+			echo ${DEF_ETH0_IP} ${DEF_HOSTNAME} >> /etc/hosts				
+			/usr/local/bin/ruby /usr/ruby/nas.rb "<?xml version=1.0 encoding=UTF-8?><Command><Call>cmdSetNetworkAdaptor</Call><pid>temppid</pid><Version>ipv4</Version><Interface>eth0</Interface><Type>static</Type><IP>${DEF_ETH0_IP}</IP><Mask>255.255.255.0</Mask><Gateway>${DEF_GATEWAY}</Gateway><MTU>1500</MTU></Command>"
+		else
+			/usr/local/bin/ruby /usr/ruby/nas.rb "<?xml version=1.0 encoding=UTF-8?><Command><Call>cmdSetNetworkAdaptor</Call><pid>temppid</pid><Version>ipv4</Version><Interface>eth0</Interface><Type>dhcp</Type><IP>${DEF_ETH0_IP}</IP><Mask>255.255.255.0</Mask><Gateway>${DEF_GATEWAY}</Gateway><MTU>1500</MTU></Command>"
+		fi
+		if [ -f /DOM/REBOOT2DEFAULTKEEPDATA ]; then
+			rm /DOM/REBOOT2DEFAULTKEEPDATA
+		else
+			mkdir /tmpshare
+			chmod 777 /tmpshare
+			touch /tmpshare/please_initial_the_system
+		fi
+		echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
+	fi
+
+
+	sleep 2
+	/etc/init.d/networking restart NOHAUPDATE
+
+	sleep 1
+	for NETDEV in eth0 eth1 eth2 eth3 eth4 eth5 eth6 eth7 lan0 lan1 lan2 lan3 lan4 lan5 lan6 lan7
+	do
+        if [ -d /sys/class/net/${NETDEV} ]; then
+                if TEST=`ethtool $NETDEV |grep 10000`; then
+                        echo Optimise 10G $NETDEV
+                        echo 10000 > /proc/sys/net/core/netdev_max_backlog
+                        echo 3000 > /proc/sys/net/core/netdev_budget
+                        sleep 1
+                        ethtool -C ${NETDEV} rx-usecs 60
+                        sleep 1
+                        ethtool -G ${NETDEV} rx 4096 tx 4096
+                        #ethtool -K ${NETDEV} lro off
+                fi
+        fi
+	done		
+	nice -n -10 /usr/httpd/bin/httpd
+
+	/bin/lcd2usb >/dev/null 2>&1 &
+	
+	sysctl -p /etc/sysctl.conf >/dev/null 2>&1 
+		
+	ln -s /lib/terminfo /usr/share/terminfo 2>/dev/null
+	
+	#GUI service start now
+	nice -n -10 /usr/httpd/bin/httpd
+	
+	if [ -f /nas/config/isDefaultBoot -o "${RESETPASS}" == "Y"  ]; then
+		if [ "${DEF_ADMINPW}" != "" ]; then
+passwd admin << eof
+${DEF_ADMINPW}
+${DEF_ADMINPW}
+eof
+/usr/local/bin/smbpasswd -sa admin << eof
+${DEF_ADMINPW}
+${DEF_ADMINPW}
+eof
+		fi
+		if [ "${DEF_ROOTPW}" != "" ]; then
+passwd << eof
+${DEF_ROOTPW}
+${DEF_ROOTPW}
+eof
+		fi		
+	fi	
+	if [ -f /nas/config/isDefaultBoot ];then
+		if [ "${DEF_SSH}" != "" ]; then
+			/usr/local/sbin/sshd
+		fi
+		if [ "${DEF_SMB}" != "" ]; then
+			ln -s /etc/samba /etc/sysconfig/sambad
+			initctl start smbd
+		fi
+		if [ "${DEF_NFS}" != "" ]; then
+			rpcbind
+			/etc/init.d/nfs-kernel-server start
+		fi
+		if [ "${DEF_AFP}" != "" ]; then
+			/etc/init.d/afp start
+		fi
+		if [ "${DEF_TEL}" != "" ]; then
+			/etc/init.d/telnetd start
+		fi
+		if [ "${DEF_FTP}" != "" ]; then
+			proftpd
+		fi
+		
+	else	
+		#Has VG
+		#ck ADS/Replication...etc
+		/usr/local/bin/ruby /usr/ruby/initdb.rb --initdb
+	fi
+	
+	/usr/local/bin/ruby /usr/ruby/runMonitor.rb start	
+	
+	kicklogon >/dev/null 2>&1
+	/usr/sbin/ipwatchd -c /etc/ipwatchd.conf
+
+	touch /var/log/lastlog
+
+	_setSysctl >/dev/null 2>&1
+	
+	#take a lot of time if detect FC
+	_load_target_backgound >/dev/null 2>&1 &
+
+
+	if [ -f /sys/block/sr0/events_poll_msecs ]; then
+		smartctl -a /dev/sr0 > /dev/null 2>&1	
+		echo 2000 >  /sys/block/sr0/events_poll_msecs
+	fi
+	touch /nas/config/isAUTOFAN
+	if [ -f /nas/config/is4BAY -o -f /nas/config/is5BAY ]; then
+		rm /nas/config/isAUTOFAN	
+		if [ -f /nas/config/isB75N ]; then
+			echo 255 > /sys/bus/i2c/devices/0-002f/pwm1
+			echo 255 > /sys/bus/i2c/devices/0-002f/pwm2
+			echo 255 > /sys/bus/i2c/devices/0-002f/pwm3
+		else	
+			echo 255 > /sys/bus/i2c/devices/1-002f/pwm1
+			echo 255 > /sys/bus/i2c/devices/1-002f/pwm2
+			echo 255 > /sys/bus/i2c/devices/1-002f/pwm3							
+		fi
+	fi
+	
+	
+	if [ -f /DOM/.startup.sh ];then
+		bash /DOM/.startup.sh
+	fi
+	
+	
+	bash /sbin/wgmon &
+	
+#END here
+}
+
+#START HERE
+echo START BOOTING.....................
+date
+export PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin"
+
+
+
+export LC_ALL="en_US.UTF-8"
+
+#kernel debug
+mount none -t debugfs /sys/kernel/debug
+
+#iSCSI
+mount cfs -t configfs /sys/kernel/config
+
+
+if ! TEST=`grep "rfs " /etc/mtab`; then
+	echo rfs / tmpfs rw 0 0 > /etc/mtab.new
+	cat /etc/mtab >> /etc/mtab.new
+       cp /etc/mtab.new /etc/mtab
+fi
+
+
+# MODEL DETECT
+# 16Bay Areca
+if [ "${ORIG_MODEL}" == "EN-3163S6T-RQX" ]; then
+	touch /nas/config/isEN3163S6TRQX
+	touch /nas/config/is3U16BAY
+# 16Bay LSI
+elif [ "${ORIG_MODEL}" == "EN-3166JS6T-SQX" ]; then
+	touch /nas/config/isEN3166JS6TSQX
+	touch /nas/config/is3U16BAY
+# 16Bay HP
+elif [ "${ORIG_MODEL}" == "EN-3160A6T-PDC" -o  "${ORIG_MODEL}" == "EN-3160A6T-PDC-1" ]; then
+	touch /nas/config/isEN3160A6TPDC
+	touch /nas/config/is3U16BAY
+	touch /nas/config/isPortMulti	
+# 12Bay Areca
+elif [ "${ORIG_MODEL}" == "EN-2123S6T-RQX" ]; then
+	touch /nas/config/isEN2123S6TRQX
+	touch /nas/config/is2U12BAY
+# 12Bay LSI
+elif [ "${ORIG_MODEL}" == "EN-2126JS6T-SQX" ]; then
+	touch /nas/config/isEN2126JS6TSQX
+	touch /nas/config/is2U12BAY
+# 8Bay LSI, JK ADD, for detail see BUG 3015
+elif [ "${ORIG_MODEL}" == "EN-2806JS6T-SQX" ]; then
+	touch /nas/config/isEN2806JS6TSQX
+	touch /nas/config/is2U8BAY
+# 12Bay HP
+elif [ "${ORIG_MODEL}" == "EN-2120A6T-PDC" -o "${ORIG_MODEL}" == "EN-2120A6T-PDC-1" ]; then
+	touch /nas/config/isEN2120A6TPDC
+	touch /nas/config/is2U12BAY
+	touch /nas/config/isPortMulti
+# 8Bay HP
+elif [ "${ORIG_MODEL}" == "EN-2800S6T-CM" ]; then
+	touch /nas/config/isEN2800S6TCM
+	touch /nas/config/is2U8BAY
+# 4Bay HP
+elif [ "${ORIG_MODEL}" == "EN-1400S6T-CM" ]; then
+	touch /nas/config/isEN1400S6TCM
+	touch /nas/config/is4BAY		
+# 5 Bay SW	
+elif [ "${ORIG_MODEL}" == "DN-500A6T-CM" ]; then
+	touch /nas/config/isDN500A6TCM
+	touch /nas/config/is5BAY
+# 4 Bay SW	
+elif [ "${ORIG_MODEL}" == "EN-1400A6T-CM" ]; then
+	touch /nas/config/isDN1400A6TCM
+	touch /nas/config/is4BAY	
+# 16 bay ZFS LSI
+elif [ "${ORIG_MODEL}" == "EN-3166JS6Z-SQX" ]; then
+	touch /nas/config/isEN3166JS6ZSQX
+	touch /nas/config/is3U16BAY
+# 16 bay ZFS HP
+elif [ "${ORIG_MODEL}" == "EN-3160A6Z-PDC" ]; then
+        touch /nas/config/isEN3160A6ZPDC
+        touch /nas/config/is3U16BAY
+        touch /nas/config/isPortMulti
+# 12 bay ZFS LSI
+elif [ "${ORIG_MODEL}" == "EN-2126JS6Z-SQX" ]; then
+	touch /nas/config/isEN2126JS6ZSQX
+	touch /nas/config/is2U12BAY	
+# 12 Bay ZFS HP
+elif [ "${ORIG_MODEL}" == "EN-2120A6Z-PDC" ]; then
+	touch /nas/config/isEN2120A6ZPDC
+	touch /nas/config/is2U12BAY
+	touch /nas/config/isPortMulti	
+# 8 Bay ZFS HP
+elif [ "${ORIG_MODEL}" == "EN-2800S6Z-CM" ]; then
+	touch /nas/config/isEN2800S6ZCM
+	touch /nas/config/is2U8BAY
+# 5 bay ZFS
+elif [ "${ORIG_MODEL}" == "DN-500A6Z-CM" ]; then
+	touch /nas/config/isDN500A6ZCM
+	touch /nas/config/is5BAY	
+# 4 bay ZFS	
+elif [ "${ORIG_MODEL}" == "EN-1400S6Z-SQX" ]; then
+	touch /nas/config/isEN1400S6ZSQX
+	touch /nas/config/is4BAY
+elif [ "${ORIG_MODEL}" == "EN-1400A6Z-CM" ]; then
+	touch /nas/config/isEN1400A6ZCM
+	touch /nas/config/is4BAY		
+fi
+
+if [ "${VENDOR}" == "PRI-1" ]; then
+	if CK=`grep "MODEL_NAME" /DOM/nas.conf|grep "AutoStor XR"` || CK=`grep "MODEL_NAME" /DOM/nas.conf|grep "AutoStor XL"`;then
+		touch /nas/config/isCDROM
+	fi
+fi
+
+#Cube3.0-USM-5
+if CK=`grep "MODEL_NAME" /DOM/nas.conf|grep "USM"`;then
+	touch /nas/config/isUSM
+fi
+
+if [ "${MULTIADM}" == "Y" ]; then
+	touch /nas/config/isMultiADM
+fi
+
+if [ "${HW_MB}" != "" ]; then
+	touch /nas/config/is${HW_MB}
+fi
+if [ "${HW_LCD}" == "USB" ]; then
+	touch /nas/config/isUSBLCD
+fi
+if [ "${HW_FAN_NUM}" != "" ]; then
+	echo ${HW_FAN_NUM} > /nas/config/FANNUM
+fi
+if [ "${HW_PWR_NUM}" != "" ]; then
+	echo ${HW_PWR_NUM} > /nas/config/PWRNUM
+fi
+if [ "${HW_ENCBOARD}" != "" ]; then
+	touch /nas/config/isENCBOARD
+fi
+
+if [  "${ISOEM}" != "" ]; then
+	touch /nas/config/isOEM
+fi
+if [  "${CHANGELOGO}" != "" ]; then
+	touch /nas/config/isCHANGELOGO
+fi
+if [  "${NOLOGOVER}" = "Y" ]; then
+	touch /nas/config/isNOLOGO
+fi
+
+if [  "${SUPPORT_WWN}" == "Y" ]; then
+	touch /nas/config/enableWWN
+fi
+
+#This file avoid udev disk insert/remove while booting
+touch /root/BOOTING
+
+#if OEM -> remove others
+loadmodule >/dev/null 2>&1 
+
+#ruby db can't exec here
+touch /root/lognow
+_init_svc_background >/dev/null 2>&1 &
+
+/bin/profamd
+#Set ACL permission for superadm and netadm to access /nas/tmp
+chmod 770 /nas/tmp
+chown admin /nas/tmp/
+/usr/bin/setfacl -m g:special_group:rwx /nas/tmp
+#Enable socket server
+/sbin/remoteCommSvr >/dev/null 2>&1 &
+
+
+echo
+echo "Waiting to load configuration........."
+echo
+
+depmod
+
+for I in $(seq 1 20)
+do
+	if [ ! -f /root/lognow ]; then
+		break;
+	fi
+	sleep 2
+	echo -n ".."
+done
+
+#alias psx="ps -o pid,tty,stat,user,time,args"
+
+clear
+echo
+echo
+echo " `date`"
+echo
+echo " Welcome, admin"
+echo " **************************************************************"
+echo " All NAS services will be started 1 min later"
+echo " FC/iSCSI Target will be started 5 mins later"
+echo " **************************************************************"
+echo
+
+
+#FIXME
+#maybe I can do clear unused modules someday, for free some memory
