@@ -251,12 +251,11 @@ _watchdog_fsck()
 			do
 				for zvol_dev in `ls /dev/zvol/${vg_dev}/`
 				do 
-					if ! chck=`echo ${zvol_dev} |grep D_SWAP`;then
-						if t=`xfs_logprint /dev/zvol/${vg_dev}/${zvol_dev} 2>/dev/null|grep uuid `;then   #see if xfs file system
-							#xfs file system
+					if [ `echo ${zvol_dev}` != "D_SWAP" ];then
+						fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} 2>/dev/null |awk -F " " '{print $3}'|awk -F "\"" '{print $2}'` #find file system
+						if [ "$fs" == "xfs" ];then						#xfs file system
 							fsck /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
-                        else
-                            #ext3,ext4 file system
+                        elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" -o "$fs" == "ext2" ];then		#ext3,ext4 file system
 							fsck -f -y /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
                         fi
 					fi
@@ -265,8 +264,13 @@ _watchdog_fsck()
 		else											# ext3,ext4,xfs file system fsck check
 			for lv_dev in `lvdisplay |grep "LV Path" |awk  -F"LV Path" '{print $2}'|sed  s/" "/""/g`
 			do
-				if ! chck=`echo ${lv_dev} |grep D_SWAP`;then
-					fsck -f -y ${lv_dev} >> /DOM/fsck.log
+				if [ `echo ${zvol_dev}` != "D_SWAP" ];then
+					fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} 2>/dev/null |awk -F " " '{print $3}'|awk -F "\"" '{print $2}'` #find file system
+					if [ "$fs" == "xfs" ];then						#xfs file system
+						fsck /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
+                    elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" -o "$fs" == "ext2" ];then		#ext3,ext4 file system
+						fsck -f -y /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
+                    fi
 				fi
 			done
 		fi
