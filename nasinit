@@ -241,24 +241,40 @@ _setSysctl(){
 }
 _watchdog_fsck()
 {
+	ln -s /usr/sbin/xfs_repair fsck.xfs					# link xfs_repair for fsck.
 	if [ -f /DOM/.nasboot -o -f /DOM/.fsrepir ];then
-        DOM1="sda"
-       if testname=`grep PROWARE /sys/block/sdb/device/model 2>/dev/null`;then
-            # Dual DOM : sda,sdb
-            DOM2="sdb"
-        fi
-
-        for target in `ls /dev/sd*`
-        do
-            DOM2=${DOM2:-sda}         # if DualDOM => DOM2=sdb, else DOM2=sda
-            if ! res=`echo $target|grep ${DOM1}` ;then
-				if ! res=`echo $target|grep ${DOM2}`;then
-                    echo $target
-                fi
-
-            fi
-
-        done
+		error_msg=`tail -n1 /DOM/.wdogrbt.log 2>/dev/null`
+		nas_name=`grep DEF_HOSTNAME /DOM/nas.conf |awk -F "=" '{print $2}'`
+		`ruby /usr/ruby/nasutil.rb --sendmail --title "NAS ${nas_name} do filesystem check " --msg "${error_msg}"`
+		if [ -f /nas/config/isZFS ]; then				# zfs file system only fsck zvol
+			for vg_dev in `ls /dev/zvol/`			#maybe have many VG
+			do
+				for zvol_dev in `ls /dev/zvol/${vg_dev}/`
+				do 
+					if ! chck=`echo ${zvol_dev} |grep D_SWAP`;then
+						if t=`xfs_logprint /dev/zvol/${vg_dev}/${zvol_dev} 2>/dev/null|grep uuid `;then   #see if xfs file system
+							#xfs file system
+							fsck /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
+                        else
+                            #ext3,ext4 file system
+							fsck -f -y /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
+                        fi
+					fi
+				done
+			done
+		else											# ext3,ext4,xfs file system fsck check
+			for lv_dev in `lvdisplay |grep "LV Path" |awk  -F"LV Path" '{print $2}'|sed  s/" "/""/g`
+			do
+				if ! chck=`echo ${lv_dev} |grep D_SWAP`;then
+					fsck -f -y ${lv_dev} >> /DOM/fsck.log
+				fi
+			done
+		fi
+		
+		rm /DOM/.fsrepir
+    else
+		# no /DOM/.nasboot or /DOM/.fsrepir => normal booting flow
+		rm /DOM/.wdogrbt.log 2>/dev/null
     fi
 
 }
@@ -600,6 +616,7 @@ _init_svc_background(){
 					zfs umount VG01/D_CONFBK
    			      fi
 			fi
+			_watchdog_fsck
 		else
 			#JK ADD
 			if [ -f /nas/config/isSWRAID ];then
