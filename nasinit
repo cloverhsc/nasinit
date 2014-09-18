@@ -243,20 +243,29 @@ _watchdog_fsck()
 {
 	ln -s /usr/sbin/xfs_repair fsck.xfs					# link xfs_repair for fsck.
 	if [ -f /DOM/.nasboot -o -f /DOM/.fsrepir ];then
+	
+		# ********** send mail to admin *********************#
 		error_msg=`tail -n1 /DOM/.wdogrbt.log 2>/dev/null`
 		nas_name=`grep DEF_HOSTNAME /DOM/nas.conf |awk -F "=" '{print $2}'`
 		`ruby /usr/ruby/nasutil.rb --sendmail --title "NAS ${nas_name} do filesystem check " --msg "${error_msg}"`
+		#****************************************************#
+		fscklog=/DOM/fsck.log
+		fifo=/nas/tmp/fsck_fifo
+		mkfifo $fifo
+		
 		if [ -f /nas/config/isZFS ]; then				# zfs file system only fsck zvol
 			for vg_dev in `ls /dev/zvol/`			#maybe have many VG
 			do
 				for zvol_dev in `ls /dev/zvol/${vg_dev}/`
 				do 
 					if [ `echo ${zvol_dev}` != "D_SWAP" ];then
-						fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} 2>/dev/null |awk -F " " '{print $3}'|awk -F "\"" '{print $2}'` #find file system
+						fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} |awk -F " TYPE=" '{print $2}'|sed -e 's;";;g;s; ;;g'` #find file system
 						if [ "$fs" == "xfs" ];then						#xfs file system
-							fsck /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
-                        elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" -o "$fs" == "ext2" ];then		#ext3,ext4 file system
-							fsck -f -y /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
+							/sbin/fsck2lcd ${fifo} xfs /${vg_dev}/${zvol_dev} &
+							fsck /dev/zvol/${vg_dev}/${zvol_dev} 2>${fifo} 
+                        elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" ];then		#ext3,ext4 file system
+							/sbin/fsck2lcd ${fifo} ext &
+							fsck -C -f -y /dev/zvol/${vg_dev}/${zvol_dev} 1>${fifo} 2>${fscklog}
                         fi
 					fi
 				done
@@ -265,11 +274,13 @@ _watchdog_fsck()
 			for lv_dev in `lvdisplay |grep "LV Path" |awk  -F"LV Path" '{print $2}'|sed  s/" "/""/g`
 			do
 				if [ `echo ${zvol_dev}` != "D_SWAP" ];then
-					fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} 2>/dev/null |awk -F " " '{print $3}'|awk -F "\"" '{print $2}'` #find file system
+					fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} |awk -F " TYPE=" '{print $2}'|sed -e 's;";;g;s; ;;g'` #find file system
 					if [ "$fs" == "xfs" ];then						#xfs file system
-						fsck /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
-                    elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" -o "$fs" == "ext2" ];then		#ext3,ext4 file system
-						fsck -f -y /dev/zvol/${vg_dev}/${zvol_dev} >> /DOM/fsck.log
+						/sbin/fsck2lcd ${fifo} xfs &
+						fsck /dev/zvol/${vg_dev}/${zvol_dev} 2>${fifo} 
+                    elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" ];then		#ext3,ext4 file system
+						/sbin/fsck2lcd ${fifo} ext &
+						fsck -C -f -y /dev/zvol/${vg_dev}/${zvol_dev} 1>${fifo} 2>${fscklog}
                     fi
 				fi
 			done
