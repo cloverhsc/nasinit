@@ -241,16 +241,16 @@ _setSysctl(){
 }
 _watchdog_fsck()
 {
-	ln -s /usr/sbin/xfs_repair fsck.xfs					# link xfs_repair for fsck.
+	ln -s /usr/sbin/xfs_repair /sbin/fsck.xfs					# link xfs_repair for fsck.
 	if [ -f /DOM/.nasboot -o -f /DOM/.fsrepir ];then
-	
+		fscklog=/DOM/fsck.log
+		fifo=/nas/tmp/fsck_fifo
 		# ********** send mail to admin *********************#
 		error_msg=`tail -n1 /DOM/.wdogrbt.log 2>/dev/null`
 		nas_name=`grep DEF_HOSTNAME /DOM/nas.conf |awk -F "=" '{print $2}'`
-		`ruby /usr/ruby/nasutil.rb --sendmail --title "NAS ${nas_name} do filesystem check " --msg "${error_msg}"`
+		`/usr/local/bin/ruby /usr/ruby/nasutil.rb --sendmail --title "NAS ${nas_name} do filesystem check " --msg "${error_msg}"`
 		#****************************************************#
-		fscklog=/DOM/fsck.log
-		fifo=/nas/tmp/fsck_fifo
+
 		mkfifo $fifo
 		
 		if [ -f /nas/config/isZFS ]; then				# zfs file system only fsck zvol
@@ -259,28 +259,59 @@ _watchdog_fsck()
 				for zvol_dev in `ls /dev/zvol/${vg_dev}/`
 				do 
 					if [ `echo ${zvol_dev}` != "D_SWAP" ];then
-						fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} |awk -F " TYPE=" '{print $2}'|sed -e 's;";;g;s; ;;g'` #find file system
+						fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} |awk -F " TYPE=" '{print $2}'|awk -F " " '{print $1}'|sed -e 's;";;g;s; ;;g'` #find file system
 						if [ "$fs" == "xfs" ];then						#xfs file system
 							/sbin/fsck2lcd ${fifo} xfs /${vg_dev}/${zvol_dev} &
 							fsck /dev/zvol/${vg_dev}/${zvol_dev} 2>${fifo} 
+							
+							if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check finish!"`
+							else
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check Failed!"`
+							fi
+							sleep 1
                         elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" ];then		#ext3,ext4 file system
-							/sbin/fsck2lcd ${fifo} ext &
+							/sbin/fsck2lcd ${fifo} ext /${vg_dev}/${zvol_dev} &
 							fsck -C -f -y /dev/zvol/${vg_dev}/${zvol_dev} 1>${fifo} 2>${fscklog}
+							
+							if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check finish!"`
+							else
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check Failed!"`
+							fi
+							sleep 1
                         fi
+						
 					fi
 				done
 			done
 		else											# ext3,ext4,xfs file system fsck check
 			for lv_dev in `lvdisplay |grep "LV Path" |awk  -F"LV Path" '{print $2}'|sed  s/" "/""/g`
 			do
-				if [ `echo ${zvol_dev}` != "D_SWAP" ];then
-					fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} |awk -F " TYPE=" '{print $2}'|sed -e 's;";;g;s; ;;g'` #find file system
+				if [ `echo ${lv_dev} |awk -F "/" '{print $4}'` != "D_SWAP" ];then
+					fs=`blkid ${lv_dev} |awk -F " TYPE=" '{print $2}'|awk -F " " '{print $1}'|sed -e 's;";;g;s; ;;g'` #find file system
 					if [ "$fs" == "xfs" ];then						#xfs file system
-						/sbin/fsck2lcd ${fifo} xfs &
-						fsck /dev/zvol/${vg_dev}/${zvol_dev} 2>${fifo} 
+						 dev_path=`echo ${lv_dev} |awk -F "dev" '{print $2}'`
+						/sbin/fsck2lcd ${fifo} xfs ${dev_path}  &
+						fsck ${lv_dev} 2>${fifo} 
+						
+						if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${dev_path}->file system check finish!"`
+							else
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${dev_path}->file system check Failed!"`
+						fi
+						sleep 1
                     elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" ];then		#ext3,ext4 file system
-						/sbin/fsck2lcd ${fifo} ext &
-						fsck -C -f -y /dev/zvol/${vg_dev}/${zvol_dev} 1>${fifo} 2>${fscklog}
+						dev_path=`echo ${lv_dev} |awk -F "dev" '{print $2}'`
+						/sbin/fsck2lcd ${fifo} ext  ${dev_path} &
+						fsck -C -f -y ${lv_dev} 1>${fifo} 2>${fscklog}
+						
+						if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${dev_path}->file system check finish!"`
+							else
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${dev_path}->file system check Error!"`
+						fi
+						sleep 1
                     fi
 				fi
 			done
@@ -631,6 +662,7 @@ _init_svc_background(){
 					zfs umount VG01/D_CONFBK
    			      fi
 			fi
+			# add by clover for watch dog file system check
 			_watchdog_fsck
 		else
 			#JK ADD
@@ -672,6 +704,9 @@ _init_svc_background(){
 			
 			vgscan
 			vgchange -ay
+			
+			# add by clover for watch dog file system check
+			_watchdog_fsck
 			lvscan				
 		fi	
 		
