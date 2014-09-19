@@ -265,9 +265,9 @@ _watchdog_fsck()
 							fsck /dev/zvol/${vg_dev}/${zvol_dev} 2>${fifo} 
 							
 							if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
-								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check finish!"`
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check finish\!"`
 							else
-								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check Failed!"`
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check Failed\!"`
 							fi
 							sleep 1
                         elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" ];then		#ext3,ext4 file system
@@ -275,9 +275,9 @@ _watchdog_fsck()
 							fsck -C -f -y /dev/zvol/${vg_dev}/${zvol_dev} 1>${fifo} 2>${fscklog}
 							
 							if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
-								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check finish!"`
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check finish\!"`
 							else
-								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check Failed!"`
+								`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check Failed\!"`
 							fi
 							sleep 1
                         fi
