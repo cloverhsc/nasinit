@@ -565,6 +565,7 @@ _init_svc_background(){
 #			zpool create -f VGTMP ${disk}
 #			zpool destroy VGTMP
 #		done	
+
 	elif [ -f /DOM/REBOOT2DEFAULTKEEPRAID ]; then
 		echo BACK TO DEFAULT BUT KEEP RAID
 		if [ -f /nas/config/isVG00Mode ]; then
@@ -950,19 +951,7 @@ _init_svc_background(){
 		fi
 	fi
 	/usr/local/bin/ruby /usr/ruby/cmdVolumeMgr.rb --volgrp --updatesize 	
-	if [ $dofsck == "Y" ];then
-# *********if do fsck send mail to admin *********************#
-		error_msg=`tail -n1 /DOM/.wdogrbt.log 2>/dev/null`
-		nas_name=`grep DEF_HOSTNAME /DOM/nas.conf |awk -F "=" '{print $2}'`
-		`/usr/local/bin/ruby /usr/ruby/nasutil.rb --sendmail --title "NAS ${nas_name} do filesystem check " --msg "${error_msg}"`
-#****************************************************#
-#*************GUI fsck MSG*****************************#
-while read line
-do
-		`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${line}"`
-done < /nas/tmp/result_fsck
-#*************************************************#
-fi
+
 	#ISCSI/FC
 	depmod
 	#auto load by target service
@@ -989,7 +978,7 @@ fi
 	fi
 
 	crontab /etc/crontab >/dev/null 2>&1
-	
+		
 
 	if [ -f /nas/config/isDualDOM ]; then
 		_checkDualDOM
@@ -1156,7 +1145,24 @@ eof
 		bash /DOM/.startup.sh
 	fi
 	
-	
+	if [ $dofsck == "Y" ];then
+# *********if do fsck send mail to admin *********************#
+	error_msg=`tail -n1 /DOM/.wdogrbt.log 2>/dev/null`
+	nas_name=`grep DEF_HOSTNAME /DOM/nas.conf |awk -F "=" '{print $2}'`
+	`/usr/local/bin/ruby /usr/ruby/nasutil.rb --sendmail --title "NAS ${nas_name} do filesystem check " --msg "${error_msg}"`
+	if [ "$?" == "0" ];then
+		echo "send ok : ${nas_name},${error_msg}" > /nas/tmp/tmail
+	else
+		echo "fail :${nas_name},${error_msg}" > /nas/tmp/tmail
+	fi
+#****************************************************#
+#*************GUI fsck MSG*****************************#
+while read line
+do
+	`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${line}"`
+done < /nas/tmp/result_fsck
+#*************************************************#
+fi
 	bash /sbin/wgmon &
 	
 #END here
