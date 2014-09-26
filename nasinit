@@ -259,27 +259,23 @@ _watchdog_fsck()
 					if [ `echo ${zvol_dev}` != "D_SWAP" ];then
 						fs=`blkid /dev/zvol/${vg_dev}/${zvol_dev} |awk -F " TYPE=" '{print $2}'|awk -F " " '{print $1}'|sed -e 's;";;g;s; ;;g'` #find file system
 						if [ "$fs" == "xfs" ];then						#xfs file system
-							/sbin/fsck2lcd ${fifo} xfs ${zvol_dev} &
+							/bin/fsck2lcd ${fifo} xfs ${zvol_dev} &
 							fsck /dev/zvol/${vg_dev}/${zvol_dev} 2>${fifo} 
 							
 							if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
 								echo "${vg_dev}/${zvol_dev}->file system check finish" >> /nas/tmp/result_fsck
-								#`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check finish\!"`
 							else
 								echo "${vg_dev}/${zvol_dev}->file system check Failed" >> /nas/tmp/result_fsck
-								#`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check Failed\!"`
 							fi
 							sleep 1
                         elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" ];then		#ext3,ext4 file system
-							/sbin/fsck2lcd ${fifo} ext ${zvol_dev} &
+							/bin/fsck2lcd ${fifo} ext ${zvol_dev} &
 							fsck -C -f -y /dev/zvol/${vg_dev}/${zvol_dev} 1>${fifo} 2>${fscklog}
 							
 							if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
 								echo "${vg_dev}/${zvol_dev}->file system check finish" >> /nas/tmp/result_fsck
-								#`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check finish\!"`
 							else
 								echo "${vg_dev}/${zvol_dev}->file system check Failed" >> /nas/tmp/result_fsck
-								#`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${vg_dev}/${zvol_dev}->file system check Failed\!"`
 							fi
 							sleep 1
                         fi
@@ -294,28 +290,24 @@ _watchdog_fsck()
 					fs=`blkid ${lv_dev} |awk -F " TYPE=" '{print $2}'|awk -F " " '{print $1}'|sed -e 's;";;g;s; ;;g'` #find file system
 					if [ "$fs" == "xfs" ];then						#xfs file system
 						 dev_path=`echo ${lv_dev} |awk -F "dev" '{print $2}'`
-						/sbin/fsck2lcd ${fifo} xfs ${lv_dev}  &
+						/bin/fsck2lcd ${fifo} xfs `echo ${lv_dev}|awk -F "/" '{print $4}'`  &
 						fsck ${lv_dev} 2>${fifo} 
 						
 						if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
 								echo "${dev_path}->file system check finish" >> /nas/tmp/result_fsck
-								#`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${dev_path}->file system check finish\!"`
 							else
 								echo "${dev_path}->file system check Failed" >> /nas/tmp/result_fsck
-								#`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${dev_path}->file system check Failed\!"`
 						fi
 						sleep 1
                     elif [ "$fs" == "ext3"  -o  "$fs" == "ext4" ];then		#ext3,ext4 file system
 						dev_path=`echo ${lv_dev} |awk -F "dev" '{print $2}'`
-						/sbin/fsck2lcd ${fifo} ext  ${lv_dev} &
+						/bin/fsck2lcd ${fifo} ext  `echo ${lv_dev}|awk -F "/" '{print $4}'` &
 						fsck -C -f -y ${lv_dev} 1>${fifo} 2>${fscklog}
 						
 						if [ "$?" == "0" ];then									# file system check success or not. show msg on GUI
 								echo "${dev_path}->file system check finish" >> /nas/tmp/result_fsck
-								#`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${dev_path}->file system check finish\!"`
 							else
 								echo "${dev_path}->file system check Failed" >> /nas/tmp/result_fsck
-								#`/usr/local/bin/ruby /usr/ruby/nasutil.rb --logwrite --type System --level WARNING --msg "${dev_path}->file system check Error\!"`
 						fi
 						sleep 1
                     fi
@@ -548,6 +540,11 @@ _init_svc_background(){
 			rm /DOM/mdadm.conf 
 		fi
 		#if [ ! -f /nas/config/isZFS ]; then
+		#******clean watch dog log by CLover ********************
+		test -f /DOM/.wdog.log && rm /DOM/.wdog.log 2>/dev/null
+		test -f /DOM/.nasboot && rm /DOM/.nasboot 2>/dev/null
+		test -f /DOM/.wdogrbt.log && rm /DOM/.wdogrbt.log 2>/dev/null
+		#********************************************************
 		rm /DOM/REBOOT2DEFAULT		
 		#fi
 		
@@ -1150,11 +1147,7 @@ eof
 	error_msg=`tail -n1 /DOM/.wdogrbt.log 2>/dev/null`
 	nas_name=`grep DEF_HOSTNAME /DOM/nas.conf |awk -F "=" '{print $2}'`
 	`/usr/local/bin/ruby /usr/ruby/nasutil.rb --sendmail --title "NAS ${nas_name} do filesystem check " --msg "${error_msg}"`
-	if [ "$?" == "0" ];then
-		echo "send ok : ${nas_name},${error_msg}" > /nas/tmp/tmail
-	else
-		echo "fail :${nas_name},${error_msg}" > /nas/tmp/tmail
-	fi
+
 #****************************************************#
 #*************GUI fsck MSG*****************************#
 while read line
